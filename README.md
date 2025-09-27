@@ -41,9 +41,34 @@
 
 ### 1. 安装依赖
 
+**推荐使用 uv（现代Python包管理器）：**
+
 ```bash
+# 安装uv (如果还没有安装)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 进入项目目录并同步依赖（自动创建虚拟环境）
 cd linovel_crawler
-pip install -r requirements.txt
+uv sync
+
+# 激活虚拟环境（可选，uv通常会自动管理）
+source .venv/bin/activate  # Linux/macOS
+# 或者在Windows上: .venv\Scripts\activate
+```
+
+**或者使用传统的pip方式：**
+
+```bash
+# 创建虚拟环境
+cd linovel_crawler
+python -m venv .venv
+
+# 激活虚拟环境
+source .venv/bin/activate  # Linux/macOS
+# 或者在Windows上: .venv\Scripts\activate
+
+# 安装依赖
+pip install scrapy pymysql redis python-dotenv
 ```
 
 ### 2. 配置环境变量
@@ -223,29 +248,32 @@ CREATE TABLE IF NOT EXISTS crawl_status (
 
 #### 1. 爬取小说列表
 ```bash
-# 爬取指定页数的小说列表
+# 使用uv运行（推荐）
+uv run python run_spiders.py list --max-pages 10
+
+# 或直接使用python（如果已激活虚拟环境）
 python run_spiders.py list --max-pages 10
 
 # 从指定页面开始爬取
-python run_spiders.py list --start-page 5 --max-pages 20
+uv run python run_spiders.py list --start-page 5 --max-pages 20
 ```
 
 #### 2. 爬取小说详情
 ```bash
 # 爬取指定小说的详细信息和章节列表
-python run_spiders.py detail --book-ids 100818,100007
+uv run python run_spiders.py detail --book-ids 100818,100007
 ```
 
 #### 3. 爬取评论数据
 ```bash
 # 爬取指定小说的评论
-python run_spiders.py comment --book-ids 100818
+uv run python run_spiders.py comment --book-ids 100818
 ```
 
 #### 4. 完整流程爬取
 ```bash
 # 运行完整的爬取流程（列表 -> 详情 -> 评论）
-python run_spiders.py all --max-pages 5
+uv run python run_spiders.py all --max-pages 5
 ```
 
 ### 高级用法
@@ -255,19 +283,19 @@ python run_spiders.py all --max-pages 5
 
 ```bash
 # 第一次运行
-python run_spiders.py all --max-pages 100
+uv run python run_spiders.py all --max-pages 100
 
 # 如果中途中断，重新运行会自动从断点继续
-python run_spiders.py all --max-pages 100
+uv run python run_spiders.py all --max-pages 100
 ```
 
 #### 监控统计
 ```bash
 # 查看爬取统计信息
-python crawler_stats.py
+uv run python crawler_stats.py
 
 # 检查数据库中的数据
-python check_data.py
+uv run python check_data.py
 ```
 
 ## 断点续爬机制
@@ -416,28 +444,35 @@ RESUME_MAX_RETRY_COUNT = 3                # 断点续爬最大重试数
 2. **单步测试**：
    ```bash
    # 先测试列表爬虫
-   python run_spiders.py list --max-pages 1
+   uv run python run_spiders.py list --max-pages 1
 
    # 再测试详情爬虫
-   python run_spiders.py detail --book-ids 100818
+   uv run python run_spiders.py detail --book-ids 100818
    ```
 
 3. **数据验证**：
    ```bash
    # 检查爬取的数据
-   python check_data.py
-   python crawler_stats.py
+   uv run python check_data.py
+   uv run python crawler_stats.py
    ```
 
 ## 技术栈
 
 - **框架**：Scrapy 2.x
+- **包管理**：uv（现代化Python包管理器）
 - **数据库**：MySQL 5.7+ / PyMySQL
 - **缓存**：Redis 5.0+ / redis-py
 - **配置**：python-dotenv
 - **并发**：threading.Lock（线程安全）
 
 ## 更新日志
+
+### v2.1.0 (2025-09-27)
+- 迁移到现代化的包管理：uv + pyproject.toml
+- 优化虚拟环境管理流程
+- 更新文档以支持uv工作流
+- 添加.uvignore配置文件
 
 ### v2.0.0 (2025-09-27)
 - 重构系统架构，实现生产级稳定性
