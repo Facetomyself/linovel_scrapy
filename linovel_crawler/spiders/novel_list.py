@@ -27,16 +27,13 @@ class NovelListSpider(scrapy.Spider):
             )
         else:
             # 如果指定了最大页数，直接开始爬取
+            # 状态检查由ResumeCrawlerMiddleware处理
             for page in range(start_page, max_pages + 1):
-                status, retry_count = self.get_crawl_status('novel_list', 'list_page', str(page))
-                if status in ['completed', 'processing']:
-                    continue
-
                 yield scrapy.Request(
                     f"{self.base_url}/cat/-1.html?page={page}",
                     callback=self.parse_list_page,
                     meta={'page': page},
-                    dont_filter=True
+                    dont_filter=True  # 不同页码的URL参数不同，必须允许重复请求
                 )
 
     def parse_total_pages(self, response):
@@ -57,9 +54,10 @@ class NovelListSpider(scrapy.Spider):
                         dont_filter=True
                     )
             else:
-                self.logger.error("无法获取总页数")
-                # 默认爬取前100页
-                for page in range(1, 101):
+                # 获取默认最大页数配置，如果无法解析总页数则使用保守的默认值
+                default_max_pages = self.crawler.settings.get('DEFAULT_MAX_PAGES', 10)
+                self.logger.warning(f"无法获取总页数，使用默认最大页数: {default_max_pages}")
+                for page in range(1, default_max_pages + 1):
                     yield scrapy.Request(
                         f"{self.base_url}/cat/-1.html?page={page}",
                         callback=self.parse_list_page,
@@ -140,10 +138,8 @@ class NovelListSpider(scrapy.Spider):
 
         except Exception as e:
             self.logger.error(f"解析列表页面失败 (page {page}): {e}")
-            # 获取当前重试次数并增加
-            _, current_retry_count = self.get_crawl_status('novel_list', 'list_page', str(page))
-            new_retry_count = current_retry_count + 1
-            yield self.update_crawl_status('novel_list', 'list_page', str(page), 'failed', new_retry_count)
+            # 发送失败状态，Pipeline会自动处理重试计数
+            yield self.update_crawl_status('novel_list', 'list_page', str(page), 'failed')
 
     def parse_novel_detail(self, response):
         """解析小说详情页 - 获取卷和章节信息"""
@@ -257,10 +253,8 @@ class NovelListSpider(scrapy.Spider):
 
         except Exception as e:
             self.logger.error(f"处理小说详情失败 (book_id: {book_id}): {e}")
-            # 获取当前重试次数并增加
-            _, current_retry_count = self.get_crawl_status('novel_detail', 'detail_page', book_id)
-            new_retry_count = current_retry_count + 1
-            yield self.update_crawl_status('novel_detail', 'detail_page', book_id, 'failed', new_retry_count)
+            # 发送失败状态，Pipeline会自动处理重试计数
+            yield self.update_crawl_status('novel_detail', 'detail_page', book_id, 'failed')
 
     def parse_chapters(self, response, book_id):
         """解析章节列表"""
@@ -337,27 +331,12 @@ class NovelListSpider(scrapy.Spider):
             self.logger.error(f"解析章节列表失败 (book_id: {book_id}): {e}")
 
     def parse_comments(self, response):
-        """解析评论数据 - 调用novel_comment spider的解析方法"""
-        book_id = response.meta['book_id']
-        page = response.meta['page']
+        """解析评论数据"""
+        from linovel_crawler.comment_parser import CommentParser
 
-        try:
-            # 触发评论数据解析
-            from linovel_crawler.spiders.novel_comment import NovelCommentSpider
-            comment_spider = NovelCommentSpider()
-            comment_spider.base_url = self.base_url
+        comment_parser = CommentParser(self.base_url)
+        yield from comment_parser.parse_comments(response, self)
 
-            # 调用novel_comment spider的解析方法
-            yield from comment_spider.parse_comments(response)
-
-        except Exception as e:
-            self.logger.error(f"解析评论失败 (book_id: {book_id}, page: {page}): {e}")
-
-    def get_crawl_status(self, spider_name, status_type, identifier):
-        """获取爬取状态"""
-        # 在Spider中无法直接访问pipeline，需要通过其他方式
-        # 这里返回默认值，实际的状态检查在pipeline中处理
-        return 'pending', 0
 
     def update_crawl_status(self, spider_name, status_type, identifier, status, retry_count=0):
         """更新爬取状态"""

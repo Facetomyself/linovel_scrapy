@@ -35,7 +35,7 @@ def check_database_data():
         for table in tables:
             cursor.execute(f"SELECT COUNT(*) FROM {table}")
             count = cursor.fetchone()[0]
-            print(f"📋 {table}: {count} 条记录")
+            print(f"{table}: {count} 条记录")
 
             # 显示最新的几条记录作为示例
             if count > 0:
@@ -43,17 +43,17 @@ def check_database_data():
                     cursor.execute(f"SELECT book_id, title FROM {table} ORDER BY created_at DESC LIMIT 3")
                     rows = cursor.fetchall()
                     for row in rows:
-                        print(f"   └─ {row[0]}: {row[1][:30]}...")
+                        print(f"     - {row[0]}: {row[1][:30]}...")
                 elif table == 'novel_chapters':
                     cursor.execute(f"SELECT book_id, chapter_title FROM {table} ORDER BY created_at DESC LIMIT 3")
                     rows = cursor.fetchall()
                     for row in rows:
-                        print(f"   └─ {row[0]}: {row[1][:30] if row[1] else 'N/A'}...")
+                        print(f"     - {row[0]}: {row[1][:30] if row[1] else 'N/A'}...")
                 elif table == 'crawl_status':
                     cursor.execute(f"SELECT spider_name, status_type, status FROM {table} ORDER BY last_update DESC LIMIT 5")
                     rows = cursor.fetchall()
                     for row in rows:
-                        print(f"   └─ {row[0]} {row[1]}: {row[2]}")
+                        print(f"     - {row[0]} {row[1]}: {row[2]}")
 
         cursor.close()
         connection.close()

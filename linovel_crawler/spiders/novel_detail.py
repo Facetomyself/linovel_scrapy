@@ -99,10 +99,8 @@ class NovelDetailSpider(scrapy.Spider):
 
         except Exception as e:
             self.logger.error(f"解析小说详情失败 (book_id: {book_id}): {e}")
-            # 获取当前重试次数并增加
-            _, current_retry_count = self.get_crawl_status('novel_detail', 'detail_page', book_id)
-            new_retry_count = current_retry_count + 1
-            yield self.update_crawl_status('novel_detail', 'detail_page', book_id, 'failed', new_retry_count)
+            # 发送失败状态，Pipeline会自动处理重试计数
+            yield self.update_crawl_status('novel_detail', 'detail_page', book_id, 'failed')
 
     def parse_chapters(self, response, book_id):
         """解析章节列表"""
@@ -177,11 +175,6 @@ class NovelDetailSpider(scrapy.Spider):
         except Exception as e:
             self.logger.error(f"解析章节列表失败 (book_id: {book_id}): {e}")
 
-    def get_crawl_status(self, spider_name, status_type, identifier):
-        """获取爬取状态"""
-        # 在Spider中无法直接访问pipeline，需要通过其他方式
-        # 这里返回默认值，实际的状态检查在pipeline中处理
-        return 'pending', 0
 
     def update_crawl_status(self, spider_name, status_type, identifier, status, retry_count=0):
         """更新爬取状态"""

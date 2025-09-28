@@ -67,11 +67,19 @@ class DatabasePipeline:
 
             temp_connection = pymysql.connect(**mysql_config_no_db)
 
-            # 创建数据库
+            # 创建数据库，转义数据库名防止注入
             db_name = os.getenv('mysql_database')
+            if not db_name:
+                raise ValueError("mysql_database环境变量未设置")
+
+            # 验证和转义数据库名（只允许字母、数字、下划线）
+            import re
+            if not re.match(r'^[a-zA-Z0-9_]+$', db_name):
+                raise ValueError(f"数据库名包含非法字符: {db_name}")
+
             with temp_connection.cursor() as cursor:
-                cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
-                logger.info(f"数据库 {db_name} 创建成功")
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+                logger.info(f"数据库 `{db_name}` 创建成功")
 
             temp_connection.close()
 
@@ -308,19 +316,39 @@ class DatabasePipeline:
 
     def save_crawl_status(self, item):
         """保存爬取状态"""
-        with self.connection.cursor() as cursor:
-            sql = """
-                INSERT INTO crawl_status (
+        def _save_status():
+            with self.connection.cursor() as cursor:
+                spider_name = item.get('spider_name')
+                status_type = item.get('status_type')
+                identifier = item.get('identifier')
+                status = item.get('status')
+
+                # 如果是失败状态，自动查询现有重试次数并自增
+                retry_count = item.get('retry_count', 0)
+                if status == 'failed':
+                    # 查询现有记录的retry_count
+                    cursor.execute("""
+                        SELECT retry_count FROM crawl_status
+                        WHERE spider_name=%s AND status_type=%s AND identifier=%s
+                    """, (spider_name, status_type, identifier))
+                    result = cursor.fetchone()
+                    existing_retry_count = result[0] if result else 0
+                    retry_count = existing_retry_count + 1
+
+                sql = """
+                    INSERT INTO crawl_status (
+                        spider_name, status_type, identifier, status, retry_count
+                    ) VALUES (%s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                        status=VALUES(status), retry_count=VALUES(retry_count)
+                """
+                cursor.execute(sql, (
                     spider_name, status_type, identifier, status, retry_count
-                ) VALUES (%s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    status=VALUES(status), retry_count=VALUES(retry_count)
-            """
-            cursor.execute(sql, (
-                item.get('spider_name'), item.get('status_type'), item.get('identifier'),
-                item.get('status'), item.get('retry_count', 0)
-            ))
-            self.connection.commit()
+                ))
+                self.connection.commit()
+                logger.debug(f"状态保存成功: {spider_name}-{status_type}-{identifier} -> {status} (重试:{retry_count})")
+
+        self._execute_with_lock(_save_status)
 
     def get_crawl_status(self, spider_name, status_type, identifier):
         """获取爬取状态"""

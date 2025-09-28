@@ -14,6 +14,12 @@ from scrapy.utils.project import get_project_settings
 from dotenv import load_dotenv
 load_dotenv()
 
+# 确保从项目目录运行
+project_dir = os.path.dirname(os.path.abspath(__file__))
+if os.getcwd() != project_dir:
+    os.chdir(project_dir)
+    sys.path.insert(0, project_dir)
+
 def run_novel_list_spider(max_pages=None, start_page=1):
     """运行小说列表爬虫"""
     settings = get_project_settings()

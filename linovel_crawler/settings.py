@@ -41,6 +41,7 @@ DOWNLOAD_DELAY = 0.1
 # See https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 SPIDER_MIDDLEWARES = {
     "linovel_crawler.middlewares.ResumeCrawlerMiddleware": 543,
+    "linovel_crawler.middlewares.DuplicateRequestFilterMiddleware": 544,
 }
 
 # Enable or disable downloader middlewares
@@ -98,6 +99,9 @@ RETRY_HTTP_CODES = [500, 502, 503, 504, 408, 429]  # HTTP codes to retry
 
 # Resume crawler settings
 RESUME_MAX_RETRY_COUNT = 3  # Maximum retry count before giving up
+
+# List page crawling settings
+DEFAULT_MAX_PAGES = 10  # Default maximum pages to crawl when total pages cannot be determined
 
 # Create logs directory if it doesn't exist
 import os
