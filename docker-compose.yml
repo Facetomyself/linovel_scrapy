@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  db:
+    image: mysql:8.0
+    container_name: linovel_mysql
+    command: ["--default-authentication-plugin=mysql_native_password", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpass
+      MYSQL_DATABASE: linovel_novel
+    volumes:
+      - db_data:/var/lib/mysql
+    ports:
+      - "13306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-prootpass"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:6.2
+    container_name: linovel_redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    container_name: linovel_app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      base_url: https://www.linovel.net/
+      mysql_host: db
+      mysql_port: 3306
+      mysql_user: root
+      mysql_password: rootpass
+      mysql_database: linovel_novel
+      redis_host: redis
+      redis_port: 6379
+      # redis_password: ""  # Uncomment if you secure Redis
+    volumes:
+      - ./logs:/app/logs
+    # Complete crawl command: list -> detail -> comment
+    command: ["all"]
+
+volumes:
+  db_data: {}
+  redis_data: {}

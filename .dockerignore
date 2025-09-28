@@ -1,0 +1,13 @@
+.git
+*.pyc
+__pycache__/
+.venv/
+logs/
+storage/
+*.log
+.env
+tests/
+*.sqlite
+*.db
+*.swp
+*.swo
