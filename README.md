@@ -38,6 +38,14 @@
 
 ## 环境要求
 
+### 方式一：Docker环境（推荐）
+
+- Docker 20.0+
+- Docker Compose 2.0+
+- 网络连接（访问目标网站）
+
+### 方式二：原生Python环境
+
 - Python 3.8+
 - MySQL 5.7+
 - Redis 5.0+
@@ -45,7 +53,88 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式一：Docker部署（推荐）
+
+#### 1. 克隆项目
+```bash
+git clone https://github.com/Facetomyself/linovel_scrapy.git
+cd linovel_scrapy
+```
+
+#### 2. 配置环境变量
+复制并编辑环境配置文件：
+```bash
+cp .env.example .env  
+# 或直接编辑 .env 文件
+```
+
+`.env` 文件内容：
+```env
+# 目标网站基础URL（通常不需要修改）
+base_url = https://www.linovel.net/
+
+# MySQL数据库配置（Docker内部网络）
+mysql_host = db
+mysql_port = 3306
+mysql_user = root
+mysql_password = rootpass
+mysql_database = linovel_novel
+
+# Redis缓存配置（Docker内部网络）
+redis_host = redis
+redis_port = 6379
+redis_password = ""  # Redis默认无密码
+```
+
+#### 3. 启动服务
+```bash
+# 启动所有服务（MySQL、Redis、爬虫）
+docker-compose up -d
+
+# 查看启动日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+```
+
+#### 4. 验证安装
+```bash
+# 检查服务状态
+docker-compose ps
+
+# 查看数据库数据
+docker-compose exec app python check_data.py
+```
+
+#### 配置文件说明
+
+项目包含以下配置文件：
+
+- **`.env`**：环境变量配置（数据库连接、Redis等）
+- **`.gitignore`**：Git忽略文件配置
+- **`.dockerignore`**：Docker构建忽略文件，避免将不必要的文件复制到镜像中
+
+`.dockerignore` 配置内容：
+```dockerignore
+.git
+*.pyc
+__pycache__/
+.venv/
+logs/
+storage/
+*.log
+.env
+tests/
+*.sqlite
+*.db
+*.swp
+*.swo
+```
+
+### 方式二：原生Python环境
+
+#### 1. 安装依赖
 
 **推荐使用 uv（现代Python包管理器）：**
 
@@ -249,6 +338,60 @@ CREATE TABLE IF NOT EXISTS crawl_status (
 ```
 
 ## 使用方法
+
+### Docker容器使用
+
+#### 启动完整爬取
+```bash
+# 启动服务并开始完整爬取
+docker-compose up
+
+# 后台运行
+docker-compose up -d
+
+# 停止服务
+docker-compose down
+```
+
+#### 自定义爬取命令
+```bash
+# 运行指定的爬虫类型
+docker-compose run --rm app list --max-pages 10
+docker-compose run --rm app detail --book-ids 100818
+docker-compose run --rm app comment --book-ids 100818
+docker-compose run --rm app all --max-pages 50
+
+# 查看帮助信息
+docker-compose run --rm app --help
+```
+
+#### 服务管理
+```bash
+# 查看服务状态
+docker-compose ps
+
+# 查看服务日志
+docker-compose logs
+docker-compose logs -f  # 实时查看
+
+# 重启服务
+docker-compose restart
+
+# 清理数据卷（谨慎使用，会删除数据库数据）
+docker-compose down -v
+```
+
+#### 数据检查和统计
+```bash
+# 检查数据库连接和数据
+docker-compose exec app python check_data.py
+
+# 查看爬取统计
+docker-compose exec app python crawler_stats.py
+
+# 检查Redis缓存
+docker-compose exec app python check_redis.py
+```
 
 ### 基本用法
 
@@ -461,30 +604,133 @@ DEFAULT_MAX_PAGES = 10                    # 无法解析总页数时的默认最
 
 2. **单步测试**：
    ```bash
-   # 先测试列表爬虫
-   uv run python run_spiders.py list --max-pages 1
+   # Docker环境
+   docker-compose run --rm app list --max-pages 1
+   docker-compose run --rm app detail --book-ids 100818
 
-   # 再测试详情爬虫
+   # 原生环境
+   uv run python run_spiders.py list --max-pages 1
    uv run python run_spiders.py detail --book-ids 100818
    ```
 
 3. **数据验证**：
    ```bash
-   # 检查爬取的数据
+   # Docker环境
+   docker-compose exec app python check_data.py
+   docker-compose exec app python crawler_stats.py
+
+   # 原生环境
    uv run python check_data.py
    uv run python crawler_stats.py
    ```
 
+### Docker相关故障排除
+
+#### Docker服务启动失败
+```bash
+错误：port already in use 或 bind: address already in use
+```
+**解决方案**：
+- 检查端口是否被占用：`netstat -tulpn | grep :3306`
+- 修改docker-compose.yml中的端口映射：
+  ```yaml
+  ports:
+    - "13307:3306"  # 改为其他未使用的端口
+    - "16380:6379"
+  ```
+- 停止冲突的服务或修改配置
+
+#### Docker容器无法访问外部网络
+```bash
+错误：Name resolution failure 或 Connection refused
+```
+**解决方案**：
+- 检查Docker网络配置：`docker network ls`
+- 重启Docker服务：`systemctl restart docker`
+- 检查防火墙设置：`ufw status` 或 `firewall-cmd --state`
+
+#### MySQL容器初始化失败
+```bash
+错误：Can't connect to MySQL server on 'db'
+```
+**解决方案**：
+- 等待MySQL完全初始化：检查健康检查状态
+  ```bash
+  docker-compose ps
+  ```
+- 查看MySQL日志：
+  ```bash
+  docker-compose logs db
+  ```
+- 如果问题持续，清理数据卷重新初始化：
+  ```bash
+  docker-compose down -v
+  docker-compose up -d db
+  ```
+
+#### Redis连接失败
+```bash
+警告：Redis连接失败，将禁用Redis缓存
+```
+**解决方案**：
+- 检查Redis容器状态：`docker-compose ps redis`
+- 查看Redis日志：`docker-compose logs redis`
+- 验证Redis配置是否正确
+- 注意：Redis失败不会影响基本功能，只会降低性能
+
+#### 容器磁盘空间不足
+```bash
+错误：no space left on device
+```
+**解决方案**：
+- 清理Docker系统：`docker system prune -a`
+- 检查磁盘使用情况：`df -h`
+- 清理日志文件：`docker-compose exec app rm -f logs/*.log`
+
+#### 爬虫在Docker中运行缓慢
+**优化建议**：
+- 调整并发参数：
+  ```python
+  # 在settings.py中
+  CONCURRENT_REQUESTS = 2  # 降低并发数
+  DOWNLOAD_DELAY = 0.5     # 增加延迟
+  ```
+- 检查网络连接质量
+- 考虑使用代理IP池
+
+#### 容器时间不同步
+```bash
+日志时间显示异常
+```
+**解决方案**：
+- 重启容器：`docker-compose restart`
+- 检查系统时间：`date`
+- 如果问题持续，考虑在docker-compose.yml中添加时间同步：
+  ```yaml
+  environment:
+    - TZ=Asia/Shanghai
+  ```
+
 ## 技术栈
 
 - **框架**：Scrapy 2.x
+- **容器化**：Docker / Docker Compose
 - **包管理**：uv（现代化Python包管理器）
 - **数据库**：MySQL 5.7+ / PyMySQL
 - **缓存**：Redis 5.0+ / redis-py
 - **配置**：python-dotenv
 - **并发**：threading.Lock（线程安全）
+- **构建工具**：Dockerfile 多阶段构建
 
 ## 更新日志
+
+### v2.3.0 (2025-09-28)
+- 新增完整的Docker容器化部署支持
+- 添加Docker Compose一键部署配置
+- 优化Docker镜像构建，使用国内镜像源加速
+- 添加.dockerignore配置文件，提升构建效率
+- 更新文档，支持Docker和原生环境双部署方式
+- 完善故障排除指南，包含Docker相关问题解决方案
 
 ### v2.2.0 (2025-09-28)
 - 新增智能重复请求过滤中间件
