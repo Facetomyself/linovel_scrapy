@@ -3,7 +3,7 @@
 # See documentation in:
 # https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
-from scrapy import signals
+from scrapy import signals, Request
 from scrapy.exceptions import IgnoreRequest
 import os
 
@@ -12,11 +12,21 @@ from itemadapter import ItemAdapter
 
 
 class ResumeCrawlerMiddleware:
-    """断点续爬中间件"""
+    """断点续爬中间件
+
+    改进点：
+    - 预加载已完成状态到内存集合，作为Redis不可用时的本地快速判断。
+    - 通过本地文件存储（LocalStateStore）在无DB/Redis时也能跨运行跳过已完成任务。
+    - 修正原先未使用的 pipelines 字段逻辑，按 spider 维护独立的 pipeline 和状态。
+    """
 
     def __init__(self):
-        self.pipelines = {}  # 按spider名称存储pipeline引用
-        self.shared_pipeline = None  # 共享的pipeline实例，用于缓存检查
+        # 每个 spider 维护独立的 pipeline、内存完成集和本地状态存储
+        self.pipelines = {}
+        self.completed_map = {}  # spider.name -> set(keys)
+        self.local_state = {}    # spider.name -> LocalStateStore
+        # 达到重试上限而需要跳过的键集合（仅内存，按 spider 隔离）
+        self.retry_skip_map = {}
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -26,40 +36,67 @@ class ResumeCrawlerMiddleware:
         return s
 
     def spider_opened(self, spider):
-        """Spider启动时预加载已完成的状态到Redis缓存"""
+        """Spider启动时预加载状态到内存和Redis（如可用），并加载本地状态文件作为兜底。"""
+        # 初始化本地状态存储
         try:
-            # 创建一个临时的pipeline实例来访问数据库
-            from linovel_crawler.pipelines import DatabasePipeline
-            temp_pipeline = DatabasePipeline()
-
-            # 初始化pipeline以建立数据库连接
-            temp_pipeline.open_spider(spider)
-
-            # 从数据库加载所有已完成的状态到Redis缓存
-            self._preload_completed_status(temp_pipeline, spider)
-
-            # 清理临时pipeline
-            temp_pipeline.close_spider(spider)
-
-            spider.logger.info(f"ResumeCrawlerMiddleware: {spider.name} 已预加载完成状态到缓存")
-
+            from linovel_crawler.state_store import LocalStateStore
+            state_path = os.path.join('storage', 'state', f'{spider.name}_status.json')
+            store = LocalStateStore(state_path)
+            store.load()
+            self.local_state[spider.name] = store
+            self.completed_map[spider.name] = store.snapshot()
+            spider.logger.info(f"ResumeCrawlerMiddleware: 已加载本地状态 {len(self.completed_map[spider.name])} 条")
         except Exception as e:
-            spider.logger.warning(f"ResumeCrawlerMiddleware: 预加载状态失败: {e}")
+            spider.logger.warning(f"ResumeCrawlerMiddleware: 加载本地状态失败: {e}")
+            self.completed_map[spider.name] = set()
+
+        # 连接数据库以预加载更多的已完成状态（如连接失败则忽略）
+        pipeline = None
+        try:
+            from linovel_crawler.pipelines import DatabasePipeline
+            pipeline = DatabasePipeline()
+            pipeline.open_spider(spider)
+            self.pipelines[spider.name] = pipeline
+
+            # 从数据库预加载完成状态到内存，并尽量写入Redis以加速
+            self._preload_completed_status(pipeline, spider)
+            spider.logger.info(f"ResumeCrawlerMiddleware: {spider.name} 已预加载完成状态")
+        except Exception as e:
+            spider.logger.warning(f"ResumeCrawlerMiddleware: 预加载数据库状态失败: {e}")
+            # 不抛出异常，允许仅依赖本地状态继续
 
     def _preload_completed_status(self, pipeline, spider):
-        """预加载已完成的状态到Redis缓存"""
+        """预加载已完成的状态到内存集合，同时可写入Redis缓存。"""
         try:
-            # 查询所有已完成的状态
             completed_status = pipeline._execute_with_lock(lambda: self._query_completed_status(pipeline))
             if completed_status:
-                # 将状态缓存到Redis
+                mem_set = self.completed_map.get(spider.name) or set()
+                # 写入内存集合
+                keys = []
                 for record_spider, status_type, identifier in completed_status:
                     cache_key = f"crawl_status:{record_spider}:{status_type}:{identifier}"
-                    pipeline.redis_client.set(cache_key, "completed", ex=86400)  # 缓存24小时
-                    spider.logger.debug(f"缓存完成状态: {cache_key} = completed")
+                    mem_set.add(cache_key)
+                    keys.append(cache_key)
+                self.completed_map[spider.name] = mem_set
 
-                spider.logger.info(f"ResumeCrawlerMiddleware: 预加载了 {len(completed_status)} 个完成状态")
+                # 尝试写入Redis（可选）
+                try:
+                    if pipeline.redis_client:
+                        for k in keys:
+                            pipeline.redis_client.set(k, "completed", ex=86400)
+                except Exception as cache_error:
+                    spider.logger.warning(f"ResumeCrawlerMiddleware: 写入Redis缓存失败: {cache_error}")
 
+                # 合并到本地状态，并持久化一次
+                try:
+                    store = self.local_state.get(spider.name)
+                    if store:
+                        store.extend_completed(keys)
+                        store.save()
+                except Exception as e:
+                    spider.logger.warning(f"ResumeCrawlerMiddleware: 本地状态持久化失败: {e}")
+
+                spider.logger.info(f"ResumeCrawlerMiddleware: 预加载 {len(keys)} 个完成状态")
         except Exception as e:
             spider.logger.warning(f"ResumeCrawlerMiddleware: 预加载状态查询失败: {e}")
 
@@ -74,71 +111,131 @@ class ResumeCrawlerMiddleware:
         return cursor.fetchall()
 
     def spider_closed(self, spider):
-        """Spider关闭时清理"""
-        if spider.name in self.pipelines:
-            del self.pipelines[spider.name]
+        """Spider关闭时持久化本地状态并清理资源"""
+        try:
+            store = self.local_state.get(spider.name)
+            if store:
+                # 将内存中的完成集落盘
+                mem = self.completed_map.get(spider.name)
+                if mem is not None:
+                    store.extend_completed(mem)
+                store.save()
+        except Exception as e:
+            spider.logger.warning(f"ResumeCrawlerMiddleware: 关闭时保存本地状态失败: {e}")
 
-        # 清理共享的pipeline实例
-        if self.shared_pipeline:
+        # 关闭并清理pipeline
+        pipeline = self.pipelines.pop(spider.name, None)
+        if pipeline:
             try:
-                self.shared_pipeline.close_spider(spider)
-            except:
+                pipeline.close_spider(spider)
+            except Exception:
                 pass
-            self.shared_pipeline = None
 
     async def process_spider_output(self, response, result, spider):
-        """处理Spider输出，过滤重复请求"""
+        """处理Spider输出，过滤重复请求并动态更新本地完成状态（支持异步输出）"""
         async for item_or_request in result:
-            # 如果是Request对象，检查是否应该跳过
-            if hasattr(item_or_request, 'url') and hasattr(item_or_request, 'callback'):
-                should_skip = self.should_skip_request(item_or_request, spider)
-                if should_skip:
+            # 1) 状态项：在本地状态中标记完成，便于同一运行内和跨运行跳过
+            try:
+                item_name = type(item_or_request).__name__
+            except Exception:
+                item_name = ''
+
+            if item_name == 'CrawlStatusItem':
+                try:
+                    status = item_or_request.get('status')
+                    if status == 'completed':
+                        key = f"crawl_status:{item_or_request.get('spider_name')}:{item_or_request.get('status_type')}:{item_or_request.get('identifier')}"
+                        # 更新内存集合
+                        mem = self.completed_map.get(spider.name)
+                        if mem is not None:
+                            mem.add(key)
+                        else:
+                            self.completed_map[spider.name] = {key}
+                        # 延迟到关闭时统一保存，避免频繁IO
+                except Exception as e:
+                    spider.logger.debug(f"ResumeCrawlerMiddleware: 更新本地完成状态失败: {e}")
+                # 无论如何，状态项继续传递给后续Pipeline处理
+                yield item_or_request
+                continue
+
+            # 2) 请求对象：判断是否应跳过
+            if isinstance(item_or_request, Request):
+                if self.should_skip_request(item_or_request, spider):
                     spider.logger.info(f"跳过已处理的请求: {item_or_request.url}")
-                    # 缓存已处理的URL，提升性能
                     pipeline = self.pipelines.get(spider.name)
                     if pipeline:
-                        pipeline.cache_url(item_or_request.url)
+                        try:
+                            pipeline.cache_url(item_or_request.url)
+                        except Exception:
+                            pass
                     continue
+
             yield item_or_request
 
     def should_skip_request(self, request, spider):
-        """判断是否应该跳过请求 - 直接检查Redis缓存"""
+        """判断是否应该跳过请求：优先检查内存/本地状态，随后可用则检查Redis。"""
         try:
             url = request.url
 
-            # 使用共享的pipeline实例，避免重复创建
-            if self.shared_pipeline is None:
-                from linovel_crawler.pipelines import DatabasePipeline
-                self.shared_pipeline = DatabasePipeline()
-                self.shared_pipeline.open_spider(spider)
-
-            pipeline = self.shared_pipeline
-
-            # 检查Redis缓存中是否有完成状态
+            # 计算与该请求对应的完成状态键
             cache_key = self._get_cache_key(url, spider)
+
+            # 0) 重试上限跳过集（仅内存）
             if cache_key:
+                retry_set = self.retry_skip_map.get(spider.name)
+                if retry_set and cache_key in retry_set:
+                    return True
+
+            # 1) 先查内存集合（最快速、无需外部依赖）
+            if cache_key:
+                mem = self.completed_map.get(spider.name)
+                if mem and cache_key in mem:
+                    return True
+
+                # 2) 再查本地存储（如果尚未在内存中）
+                store = self.local_state.get(spider.name)
+                if store and store.is_completed(cache_key):
+                    # 同步回内存，加速后续判断
+                    mem = self.completed_map.setdefault(spider.name, set())
+                    mem.add(cache_key)
+                    return True
+
+            # 3) 可选：如果Redis可用，检查Redis缓存
+            pipeline = self.pipelines.get(spider.name)
+            if cache_key and pipeline and getattr(pipeline, 'redis_client', None):
                 try:
                     cached_status = pipeline.redis_client.get(cache_key)
                     if cached_status:
                         status_str = cached_status.decode() if isinstance(cached_status, bytes) else cached_status
                         if status_str == "completed":
-                            spider.logger.info(f"跳过已完成的请求: {url}")
+                            # 同步回内存/本地
+                            self.completed_map.setdefault(spider.name, set()).add(cache_key)
                             return True
                 except Exception as cache_error:
-                    spider.logger.warning(f"读取缓存失败: {cache_key} - {cache_error}")
+                    spider.logger.debug(f"读取Redis缓存失败: {cache_key} - {cache_error}")
 
-            # 检查URL缓存（已处理的URL）
-            if pipeline.is_url_cached(url):
-                spider.logger.debug(f"跳过已处理的URL: {url}")
+            # 3.5) 数据库重试阈值判断：超过上限则跳过
+            if cache_key and pipeline and getattr(pipeline, 'connection', None):
+                parsed = self._parse_cache_key(cache_key)
+                if parsed:
+                    p_spider, status_type, identifier = parsed
+                    try:
+                        status, retry_count = pipeline.get_crawl_status(p_spider, status_type, identifier)
+                        max_retry = spider.crawler.settings.getint('RESUME_MAX_RETRY_COUNT', 3)
+                        if status == 'failed' and retry_count >= max_retry:
+                            self.retry_skip_map.setdefault(spider.name, set()).add(cache_key)
+                            spider.logger.info(f"跳过已达重试上限的请求: {url} (retry={retry_count}, max={max_retry})")
+                            return True
+                    except Exception as e:
+                        spider.logger.debug(f"查询重试状态失败: {cache_key} - {e}")
+
+            # 4) URL级别的短期缓存（仅作为性能优化）
+            if pipeline and hasattr(pipeline, 'is_url_cached') and pipeline.is_url_cached(url):
                 return True
 
-            spider.logger.debug(f"允许请求: {url}")
             return False
-
         except Exception as e:
-            spider.logger.warning(f"ResumeCrawlerMiddleware: 检查请求状态失败: {e}")
-            import traceback
-            spider.logger.debug(f"详细错误: {traceback.format_exc()}")
+            spider.logger.debug(f"ResumeCrawlerMiddleware: 检查请求状态失败: {e}")
             return False
 
     def _get_cache_key(self, url, spider):
@@ -175,6 +272,33 @@ class ResumeCrawlerMiddleware:
             spider.logger.warning(f"生成缓存键失败: {url} - {e}")
             return None
 
+    def _parse_cache_key(self, cache_key):
+        """将缓存键解析为 (spider_name, status_type, identifier)"""
+        try:
+            parts = cache_key.split(':', 3)
+            if len(parts) == 4 and parts[0] == 'crawl_status':
+                return parts[1], parts[2], parts[3]
+        except Exception:
+            pass
+        return None
+
+    async def process_start(self, start):
+        """在起始阶段也进行跳过判断，避免已完成任务的首个请求重复发出"""
+        async for item_or_request in start:
+            if isinstance(item_or_request, Request):
+                cb = getattr(item_or_request, 'callback', None)
+                spider = getattr(cb, '__self__', None)
+                if spider and self.should_skip_request(item_or_request, spider):
+                    try:
+                        spider.logger.info(f"跳过已处理的起始请求: {item_or_request.url}")
+                        pipeline = self.pipelines.get(spider.name)
+                        if pipeline:
+                            pipeline.cache_url(item_or_request.url)
+                    except Exception:
+                        pass
+                    continue
+            yield item_or_request
+
 
 class LinovelCrawlerSpiderMiddleware:
     # Not all methods need to be defined. If a method is not defined,
@@ -195,24 +319,24 @@ class LinovelCrawlerSpiderMiddleware:
         # Should return None or raise an exception.
         return None
 
-    def process_spider_output(self, response, result, spider):
+    async def process_spider_output(self, response, result, spider):
         # Called with the results returned from the Spider, after
         # it has processed the response.
 
-        # Must return an iterable of Request, or item objects.
-        for i in result:
+        # Must return an (async) iterable of Request, or item objects.
+        async for i in result:
             yield i
 
-    def process_spider_exception(self, response, exception, spider):
+    async def process_spider_exception(self, response, exception, spider):
         # Called when a spider or process_spider_input() method
         # (from other spider middleware) raises an exception.
 
         # Should return either None or an iterable of Request or item objects.
-        pass
+        return None
 
     async def process_start(self, start):
         # Called with an async iterator over the spider start() method or the
-        # maching method of an earlier spider middleware.
+        # matching method of an earlier spider middleware.
         async for item_or_request in start:
             yield item_or_request
 
@@ -282,10 +406,10 @@ class DuplicateRequestFilterMiddleware:
     def from_crawler(cls, crawler):
         return cls()
 
-    def process_spider_output(self, response, result, spider):
-        """处理Spider输出，过滤重复请求"""
-        for item in result:
-            if hasattr(item, 'url'):  # 这是Request对象
+    async def process_spider_output(self, response, result, spider):
+        """处理Spider输出，过滤重复请求（支持异步输出）"""
+        async for item in result:
+            if isinstance(item, Request):  # 这是Request对象
                 # 生成自定义指纹
                 fingerprint = self._get_request_fingerprint(item, spider)
                 if fingerprint and fingerprint in self.seen_requests:

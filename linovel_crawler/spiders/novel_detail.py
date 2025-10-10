@@ -9,25 +9,37 @@ from linovel_crawler.items import NovelItem, NovelVolumeItem, NovelChapterItem, 
 class NovelDetailSpider(scrapy.Spider):
     name = "novel_detail"
     allowed_domains = ["linovel.net"]
+    custom_settings = {
+        'JOBDIR': 'storage/jobs/novel_detail',
+        'SCHEDULER_PERSIST': True,
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.base_url = os.getenv('base_url', 'https://www.linovel.net')
 
-    def start_requests(self):
-        """从参数获取book_id"""
+    def _iter_start_requests(self):
+        """公共起始请求生成器，供 start() 与 start_requests() 复用"""
         book_ids = getattr(self, 'book_ids', None)
         if book_ids:
             for book_id in book_ids.split(','):
                 yield scrapy.Request(
                     f"{self.base_url}/book/{book_id.strip()}.html",
                     callback=self.parse_detail,
-                    meta={'book_id': book_id.strip()},
-                    dont_filter=True
+                    meta={'book_id': book_id.strip()}
                 )
         else:
             # 如果没有指定book_ids，输出提示
             self.logger.info("未指定book_ids参数，将不爬取任何详情页")
+
+    def start_requests(self):
+        """兼容低版本Scrapy的启动入口"""
+        yield from self._iter_start_requests()
+
+    async def start(self):
+        """Scrapy 2.13+ 推荐的异步启动入口"""
+        for req in self._iter_start_requests():
+            yield req
 
     def query_pending_books(self):
         """查询待处理的书籍"""
@@ -45,6 +57,32 @@ class NovelDetailSpider(scrapy.Spider):
             # 创建小说基本信息item（如果需要更新）
             novel_item = NovelItem()
             novel_item['book_id'] = book_id
+            novel_item['detail_url'] = response.url
+
+            # 解析标题（与列表爬虫逻辑一致，尽量健壮）
+            title_selectors = [
+                '//title/text()',
+                '//meta[@property="og:title"]/@content',
+                '//h1[@class="book-title"]/text()',
+                '//div[@class="book-title"]/h1/text()',
+                '//h1/text()'
+            ]
+            for selector in title_selectors:
+                title = response.xpath(selector).get()
+                if title:
+                    title = title.strip()
+                    if ' - ' in title:
+                        title = title.split(' - ')[0]
+                    if ' | ' in title:
+                        title = title.split(' | ')[0]
+                    if '_轻小说_' in title and '_轻之文库' in title:
+                        parts = title.split('_轻小说_')
+                        if len(parts) >= 2:
+                            title = parts[0].strip()
+                    title = title.replace('_轻之文库', '').strip()
+                    if len(title) > 0 and title not in ('轻小说文库', '轻之文库'):
+                        novel_item['title'] = title
+                        break
 
             # XPath: //div[@class='book-data'] 为小说基本数据
             book_data = response.xpath('//div[@class="book-data"]')
@@ -86,9 +124,9 @@ class NovelDetailSpider(scrapy.Spider):
                     novel_item['last_update'] = update_time.strip()
 
             # 如果有新信息，yield小说item
-            if any([novel_item.get('word_count'), novel_item.get('popularity'),
+            if any([novel_item.get('title'), novel_item.get('word_count'), novel_item.get('popularity'),
                    novel_item.get('favorites'), novel_item.get('status'),
-                   novel_item.get('sign_status'), novel_item.get('last_update')]):
+                   novel_item.get('sign_status'), novel_item.get('last_update'), novel_item.get('detail_url')]):
                 yield novel_item
 
             # 解析章节列表

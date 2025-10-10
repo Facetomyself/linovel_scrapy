@@ -9,13 +9,17 @@ from linovel_crawler.items import NovelCommentItem, CrawlStatusItem
 class NovelCommentSpider(scrapy.Spider):
     name = "novel_comment"
     allowed_domains = ["linovel.net"]
+    custom_settings = {
+        'JOBDIR': 'storage/jobs/novel_comment',
+        'SCHEDULER_PERSIST': True,
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.base_url = os.getenv('base_url', 'https://www.linovel.net')
 
-    def start_requests(self):
-        """从参数获取待处理的book_id"""
+    def _iter_start_requests(self):
+        """公共起始请求生成器，供 start() 与 start_requests() 复用"""
         book_ids = getattr(self, 'book_ids', None)
         if book_ids:
             for book_id in book_ids.split(','):
@@ -23,7 +27,6 @@ class NovelCommentSpider(scrapy.Spider):
                     f"{self.base_url}/comment/items?type=book&tid={book_id.strip()}&pageSize=15&page=1",
                     callback=self.parse_comments,
                     meta={'book_id': book_id.strip(), 'page': 1},
-                    dont_filter=True,
                     headers={
                         'Accept': 'application/json, text/javascript, */*; q=0.01',
                         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',
@@ -33,6 +36,15 @@ class NovelCommentSpider(scrapy.Spider):
         else:
             # 如果没有指定book_ids，输出提示
             self.logger.info("未指定book_ids参数，将不爬取任何评论")
+
+    def start_requests(self):
+        """兼容低版本Scrapy的启动入口"""
+        yield from self._iter_start_requests()
+
+    async def start(self):
+        """Scrapy 2.13+ 推荐的异步启动入口"""
+        for req in self._iter_start_requests():
+            yield req
 
     def query_pending_comments(self):
         """查询待处理的评论"""

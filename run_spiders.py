@@ -9,6 +9,8 @@ import sys
 import argparse
 from scrapy.crawler import CrawlerProcess
 from scrapy.utils.project import get_project_settings
+import shutil
+
 
 # 加载环境变量
 from dotenv import load_dotenv
@@ -25,6 +27,9 @@ def run_novel_list_spider(max_pages=None, start_page=1):
     settings = get_project_settings()
     process = CrawlerProcess(settings)
 
+    # 自愈可能损坏的作业目录
+    ensure_jobdir_healthy('storage/jobs/novel_list')
+
     spider_args = {}
     if max_pages:
         spider_args['max_pages'] = max_pages
@@ -38,6 +43,8 @@ def run_novel_detail_spider(book_ids=None):
     settings = get_project_settings()
     process = CrawlerProcess(settings)
 
+    ensure_jobdir_healthy('storage/jobs/novel_detail')
+
     spider_args = {}
     if book_ids:
         spider_args['book_ids'] = book_ids
@@ -50,6 +57,8 @@ def run_novel_comment_spider(book_ids=None):
     settings = get_project_settings()
     process = CrawlerProcess(settings)
 
+    ensure_jobdir_healthy('storage/jobs/novel_comment')
+
     spider_args = {}
     if book_ids:
         spider_args['book_ids'] = book_ids
@@ -61,6 +70,11 @@ def run_all_spiders(max_pages=None, book_ids=None):
     """运行所有爬虫"""
     settings = get_project_settings()
     process = CrawlerProcess(settings)
+
+    # 尽量在启动前自愈作业目录
+    ensure_jobdir_healthy('storage/jobs/novel_list')
+    ensure_jobdir_healthy('storage/jobs/novel_detail')
+    ensure_jobdir_healthy('storage/jobs/novel_comment')
 
     if book_ids:
         # 如果指定了book_ids，运行所有爬虫
@@ -83,6 +97,27 @@ def run_all_spiders(max_pages=None, book_ids=None):
         process.crawl('novel_list', **spider_args_list)
 
     process.start()
+
+def ensure_jobdir_healthy(jobdir: str):
+    """检查并自愈 Scrapy JOBDIR，避免队列文件损坏导致的 struct.error。
+
+    条件：如果存在 requests.queue 且文件大小小于 4 字节，视为损坏，直接清理目录。
+    """
+    try:
+        if not os.path.isdir(jobdir):
+            return
+        qfile = os.path.join(jobdir, 'requests.queue')
+        if os.path.exists(qfile):
+            try:
+                size = os.path.getsize(qfile)
+                if size < 4:
+                    print(f"检测到损坏的作业队列文件，正在清理: {qfile}")
+                    shutil.rmtree(jobdir, ignore_errors=True)
+                    os.makedirs(jobdir, exist_ok=True)
+            except Exception as e:
+                print(f"作业目录检查异常（忽略）：{jobdir} - {e}")
+    except Exception:
+        pass
 
 def main():
     parser = argparse.ArgumentParser(description='小说爬虫启动脚本')

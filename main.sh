@@ -13,11 +13,8 @@ cd "$SCRIPT_DIR"
 # Ensure logs directory exists for Scrapy file logging
 mkdir -p logs
 
-# Load .env if present (non-fatal if missing)
-if [ -f .env ]; then
-  # shellcheck disable=SC2046
-  export $(grep -v '^#' .env | xargs -r) || true
-fi
+# Note: Python entrypoints call python-dotenv to load .env;
+# avoid parsing here to support "KEY = value" format and CRLF safely.
 
 if [ "$#" -eq 0 ]; then
   echo "Usage: $0 {list|detail|comment|all} [args...]" >&2
@@ -28,4 +25,3 @@ if [ "$#" -eq 0 ]; then
 fi
 
 exec python -u run_spiders.py "$@"
-

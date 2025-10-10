@@ -12,11 +12,14 @@ load_dotenv()
 
 def check_redis_cache():
     try:
-        # 连接Redis
+        # 连接Redis（支持密码与ACL用户名，可选）
+        redis_password = os.getenv('redis_password') or None
+        redis_username = os.getenv('redis_username') or None
         redis_client = redis.Redis(
             host=os.getenv('redis_host', 'localhost'),
             port=int(os.getenv('redis_port', 6379)),
-            password=os.getenv('redis_password'),
+            password=redis_password,
+            username=redis_username,
             decode_responses=True
         )
 

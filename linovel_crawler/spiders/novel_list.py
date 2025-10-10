@@ -8,13 +8,17 @@ from linovel_crawler.items import NovelItem, NovelVolumeItem, NovelChapterItem, 
 class NovelListSpider(scrapy.Spider):
     name = "novel_list"
     allowed_domains = ["linovel.net"]
+    custom_settings = {
+        'JOBDIR': 'storage/jobs/novel_list',
+        'SCHEDULER_PERSIST': True,
+    }
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.base_url = os.getenv('base_url', 'https://www.linovel.net')
 
-    def start_requests(self):
-        """开始请求，检查断点续爬"""
+    def _iter_start_requests(self):
+        """公共起始请求生成器，供 start() 与 start_requests() 复用"""
         start_page = getattr(self, 'start_page', 1)
         max_pages = getattr(self, 'max_pages', None)
 
@@ -32,9 +36,17 @@ class NovelListSpider(scrapy.Spider):
                 yield scrapy.Request(
                     f"{self.base_url}/cat/-1.html?page={page}",
                     callback=self.parse_list_page,
-                    meta={'page': page},
-                    dont_filter=True  # 不同页码的URL参数不同，必须允许重复请求
+                    meta={'page': page}
                 )
+
+    def start_requests(self):
+        """兼容低版本Scrapy的启动入口"""
+        yield from self._iter_start_requests()
+
+    async def start(self):
+        """Scrapy 2.13+ 推荐的异步启动入口"""
+        for req in self._iter_start_requests():
+            yield req
 
     def parse_total_pages(self, response):
         """解析总页数"""
@@ -50,8 +62,7 @@ class NovelListSpider(scrapy.Spider):
                     yield scrapy.Request(
                         f"{self.base_url}/cat/-1.html?page={page}",
                         callback=self.parse_list_page,
-                        meta={'page': page},
-                        dont_filter=True
+                        meta={'page': page}
                     )
             else:
                 # 获取默认最大页数配置，如果无法解析总页数则使用保守的默认值
@@ -61,8 +72,7 @@ class NovelListSpider(scrapy.Spider):
                     yield scrapy.Request(
                         f"{self.base_url}/cat/-1.html?page={page}",
                         callback=self.parse_list_page,
-                        meta={'page': page},
-                        dont_filter=True
+                        meta={'page': page}
                     )
 
         except Exception as e:
@@ -98,8 +108,7 @@ class NovelListSpider(scrapy.Spider):
                         yield scrapy.Request(
                             novel_item['detail_url'],
                             callback=self.parse_novel_detail,
-                            meta={'book_id': novel_item['book_id']},
-                            dont_filter=True
+                            meta={'book_id': novel_item['book_id']}
                         )
 
                 # XPath: //div[@class='book-cover']/img/@src 小说封面
@@ -243,7 +252,6 @@ class NovelListSpider(scrapy.Spider):
                 f"{self.base_url}/comment/items?type=book&tid={book_id}&pageSize=15&page=1",
                 callback=self.parse_comments,
                 meta={'book_id': book_id, 'page': 1},
-                dont_filter=True,
                 headers={
                     'Accept': 'application/json, text/javascript, */*; q=0.01',
                     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6',

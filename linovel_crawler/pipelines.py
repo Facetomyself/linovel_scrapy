@@ -28,10 +28,21 @@ class DatabasePipeline:
             'charset': 'utf8mb4'
         }
 
+        # 兼容带密码与无密码的Redis配置；空字符串视为未设置
+        redis_password = os.getenv('redis_password')
+        if not redis_password:
+            redis_password = None
+
+        # 可选：Redis ACL 用户名
+        redis_username = os.getenv('redis_username')
+        if not redis_username:
+            redis_username = None
+
         self.redis_config = {
             'host': os.getenv('redis_host'),
             'port': int(os.getenv('redis_port', 6379)),
-            'password': os.getenv('redis_password'),
+            'password': redis_password,
+            'username': redis_username,
             'decode_responses': True
         }
 
@@ -247,19 +258,36 @@ class DatabasePipeline:
                     sign_status, last_update, detail_url
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
-                    title=VALUES(title), cover_url=VALUES(cover_url),
-                    author=VALUES(author), intro=VALUES(intro),
-                    tags=VALUES(tags), word_count=VALUES(word_count),
-                    popularity=VALUES(popularity), favorites=VALUES(favorites),
-                    status=VALUES(status), sign_status=VALUES(sign_status),
-                    last_update=VALUES(last_update), detail_url=VALUES(detail_url)
+                    title=COALESCE(VALUES(title), title),
+                    cover_url=COALESCE(VALUES(cover_url), cover_url),
+                    author=COALESCE(VALUES(author), author),
+                    intro=COALESCE(VALUES(intro), intro),
+                    tags=COALESCE(VALUES(tags), tags),
+                    word_count=COALESCE(VALUES(word_count), word_count),
+                    popularity=COALESCE(VALUES(popularity), popularity),
+                    favorites=COALESCE(VALUES(favorites), favorites),
+                    status=COALESCE(VALUES(status), status),
+                    sign_status=COALESCE(VALUES(sign_status), sign_status),
+                    last_update=COALESCE(VALUES(last_update), last_update),
+                    detail_url=COALESCE(VALUES(detail_url), detail_url)
             """
+            # 避免用缺失字段覆盖已有值：仅当 item 含有该字段时才写入；否则传 None 以触发 COALESCE 使用旧值
+            tags_val = item.get('tags') if 'tags' in item else None
+            tags_json = json.dumps(tags_val) if tags_val is not None else None
             cursor.execute(sql, (
-                item.get('book_id'), item.get('title'), item.get('cover_url'),
-                item.get('author'), item.get('intro'), json.dumps(item.get('tags', [])),
-                item.get('word_count'), item.get('popularity'), item.get('favorites'),
-                item.get('status'), item.get('sign_status'), item.get('last_update'),
-                item.get('detail_url')
+                item.get('book_id'),
+                item.get('title') if 'title' in item else None,
+                item.get('cover_url') if 'cover_url' in item else None,
+                item.get('author') if 'author' in item else None,
+                item.get('intro') if 'intro' in item else None,
+                tags_json,
+                item.get('word_count') if 'word_count' in item else None,
+                item.get('popularity') if 'popularity' in item else None,
+                item.get('favorites') if 'favorites' in item else None,
+                item.get('status') if 'status' in item else None,
+                item.get('sign_status') if 'sign_status' in item else None,
+                item.get('last_update') if 'last_update' in item else None,
+                item.get('detail_url') if 'detail_url' in item else None
             ))
             self.connection.commit()
             logger.debug(f"小说保存成功: {item.get('book_id')} - {cursor.rowcount}行受影响")

@@ -107,3 +107,6 @@ DEFAULT_MAX_PAGES = 10  # Default maximum pages to crawl when total pages cannot
 import os
 if not os.path.exists('logs'):
     os.makedirs('logs')
+# Ensure local persistence directories exist for resume/skip
+os.makedirs('storage/state', exist_ok=True)
+os.makedirs('storage/jobs', exist_ok=True)

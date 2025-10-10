@@ -1,6 +1,6 @@
 # Linovel小说爬虫
 
-基于Scrapy的小说网站爬虫，支持异步爬取、断点续爬和数据持久化。
+基于Scrapy的小说网站爬虫，支持异步爬取、断点续爬和数据持久化。已适配 Scrapy 2.13 的异步中间件与启动接口。
 
 > 仅供参考思路,请求太频繁会被封ip,具体的小说章节我也没抓
 
@@ -9,12 +9,15 @@
 - 多线程异步爬取（默认4线程，可配置）
 - 自动创建数据库表结构
 - Redis缓存支持，提升性能
-- 智能断点续爬机制
+- 智能断点续爬机制（DB/Redis 本地多级兜底）
 - MySQL数据持久化存储
 - 完整的小说信息爬取（基础信息、卷信息、章节URL）
 - 评论数据爬取和存储
 - 实时监控和统计功能
 - 生产级别的错误处理和重试机制
+ - JOBDIR 作业持久化（掉线/重启可从未完成队列继续）
+ - 起始请求跳过 + 达重试上限跳过（更少无效请求）
+ - Null-safe UPSERT：避免增量字段把已有数据覆盖为 NULL
 
 ## 系统架构
 
@@ -80,10 +83,13 @@ mysql_user = root
 mysql_password = rootpass
 mysql_database = linovel_novel
 
-# Redis缓存配置（Docker内部网络）
+# Redis缓存配置（Docker内部网络/远程）
 redis_host = redis
 redis_port = 6379
-redis_password = ""  # Redis默认无密码
+# 当Redis启用密码认证时填写；留空或不设置表示无密码
+redis_password = your_strong_password
+# 可选：Redis 6+ ACL 用户名（通常可留空）
+# redis_username = your_user
 ```
 
 #### 3. 启动服务
@@ -163,7 +169,7 @@ source .venv/bin/activate  # Linux/macOS
 # 或者在Windows上: .venv\Scripts\activate
 
 # 安装依赖
-pip install scrapy pymysql redis python-dotenv
+pip install -r requirements.txt
 ```
 
 ### 2. 配置环境变量
@@ -184,7 +190,10 @@ mysql_database = mysql_database
 # Redis缓存配置
 redis_host = redis_host
 redis_port = redis_port
-redis_password = redis_password
+# 当Redis启用密码认证时填写；留空或不设置表示无密码
+redis_password = your_strong_password
+# 可选：Redis 6+ ACL 用户名（通常可留空）
+# redis_username = your_user
 ```
 
 ### 3. 测试数据库连接
@@ -212,7 +221,7 @@ python test_db.py
 | favorites | INT | 收藏数 |
 | status | VARCHAR(20) | 连载状态 |
 | sign_status | VARCHAR(50) | 签约状态 |
-| last_update | DATETIME | 最后更新时间 |
+| last_update | VARCHAR(50) | 最后更新时间（源站原样文本） |
 | detail_url | TEXT | 详情页URL |
 | created_at | TIMESTAMP | 创建时间 |
 | updated_at | TIMESTAMP | 更新时间 |
@@ -230,7 +239,7 @@ CREATE TABLE IF NOT EXISTS novels (
     favorites INT,
     status VARCHAR(20),
     sign_status VARCHAR(50),
-    last_update DATETIME,
+    last_update VARCHAR(50),
     detail_url TEXT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -355,7 +364,7 @@ docker-compose down
 
 #### 自定义爬取命令
 ```bash
-# 运行指定的爬虫类型
+# 运行指定的爬虫类型（容器内入口脚本 main.sh -> run_spiders.py）
 docker-compose run --rm app list --max-pages 10
 docker-compose run --rm app detail --book-ids 100818
 docker-compose run --rm app comment --book-ids 100818
@@ -456,6 +465,37 @@ uv run python check_data.py
 3. **智能跳过**：检查已完成的页面，自动跳过重复请求
 4. **失败重试**：对失败的任务自动重试，最多3次
 5. **缓存加速**：Redis缓存已处理的URL，提升性能
+6. **本地状态**：无法连接DB/Redis时，使用 `storage/state/<spider>_status.json` 做本地持久化，仍可跳过已完成任务
+7. **起始请求跳过**：中间件在启动阶段也执行跳过逻辑（如评论页 page=1 已完成时不再请求）
+8. **重试上限跳过**：若 DB 中记录 `status=failed` 且 `retry_count >= RESUME_MAX_RETRY_COUNT`（默认3），则跳过该请求
+
+### 作业持久化（JOBDIR）
+
+为增强断点恢复能力，每个 Spider 启用了 Scrapy 的作业目录：
+
+- 列表：`storage/jobs/novel_list`
+- 详情：`storage/jobs/novel_detail`
+- 评论：`storage/jobs/novel_comment`
+
+这会持久化调度队列和去重指纹，从而在进程重启后继续未完成的请求队列，并避免重复请求。
+
+自愈：运行入口在启动前检查 `storage/jobs/<spider>/requests.queue`，若检测为损坏（小于4字节），将自动清理作业目录并重建，避免 `struct.error`。
+
+注意：如需强制全量重抓，手动删除对应 JOBDIR 目录与 `storage/state/*.json`。
+
+### 数据防护（Null-safe UPSERT）
+
+为避免增量 item（如详情页只带数值字段）把列表页写入的作者/简介/封面/标签等覆盖为 NULL，数据库写入采用：
+
+- `field = COALESCE(VALUES(field), field)`
+- 当 item 未包含某字段时，按 None 传入，触发 COALESCE 保留旧值
+
+这能显著降低“字段缺失”问题。如需回填历史缺失，可参考下文“数据重置与回填”。
+
+### Scrapy 2.13 兼容
+
+- Spider 采用 `async def start()`，同时保留 `start_requests()` 兼容旧版本
+- 中间件 `process_spider_output`/`process_start` 均支持异步输出
 
 ### 重试策略
 
@@ -528,6 +568,40 @@ RESUME_MAX_RETRY_COUNT = 3                # 断点续爬最大重试数
 # 爬取限制设置
 DEFAULT_MAX_PAGES = 10                    # 无法解析总页数时的默认最大页数
 ```
+
+## 运行与管理
+
+### 直接运行入口
+
+项目提供单一入口脚本：`./main.sh`（自动创建日志目录，Python 端加载 .env）。示例：
+
+```bash
+# 列表 10 页
+./main.sh list --max-pages 10
+
+# 指定书籍详情
+./main.sh detail --book-ids 100818,100007
+
+# 指定书籍评论
+./main.sh comment --book-ids 100818
+
+# 全流程
+./main.sh all --max-pages 50
+```
+
+## 数据重置与回填（破坏性操作）
+
+当需要回到干净状态或强制回填缺失字段，可使用脚本 `reset_data.py`（务必确认 .env 正确）：
+
+```bash
+# 仅清空业务表 + 按前缀清理 Redis + 清理本地断点（推荐）
+python reset_data.py --truncate --clear-redis --clear-local --yes
+
+# 彻底重置数据库 + Redis 整库清空 + 清理本地断点（最危险）
+python reset_data.py --drop-db --flush-redis --clear-local --yes
+```
+
+如仅需回填列表字段（作者/简介/标签/封面），可删除对应 `crawl_status` 中 `novel_list/list_page` 的完成状态再跑列表，即可恢复这些字段。
 
 ## 注意事项
 
